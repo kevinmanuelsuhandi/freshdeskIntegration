@@ -1,0 +1,21 @@
+{
+  "platform-version": "3.0",
+  "modules": {
+    "common": {
+      "location": {
+        "cti_global_sidebar": {
+          "url": "index.html",
+          "icon": "styles/images/icon.svg"
+        }
+      }
+    },
+    "support_ticket": {}
+  },
+  "engines": {
+    "node": "24.11.1",
+    "fdk": "10.1.2"
+  },
+  "scripts": {
+    "fdk-unit-test": "vitest run --coverage"
+  }
+}
