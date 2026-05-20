@@ -1,0 +1,19 @@
+# FDK local & build artifacts
+.fdk/
+dist/
+coverage/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Local config / secrets (jangan commit)
+config/iparam_test_data.json
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
