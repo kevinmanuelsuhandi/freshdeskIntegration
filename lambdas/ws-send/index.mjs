@@ -1,3 +1,15 @@
+// ============================================================================
+//  ws-send  (Lambda Function URL, auth: NONE)
+// ----------------------------------------------------------------------------
+//  Called by Hoiio to push data to a connected agent's WebSocket.
+//  Returns 410 (Gone) when the connection is dead so Hoiio can clean up
+//  its stale sessionId mapping (lazy garbage collection).
+//
+//  Env vars: none. The API Gateway endpoint is hardcoded because this
+//  Lambda lives outside the WebSocket API event loop and has no
+//  event.requestContext.domainName to read from.
+// ============================================================================
+
 import {
   ApiGatewayManagementApiClient,
   PostToConnectionCommand,
@@ -23,13 +35,13 @@ export const handler = async (event) => {
     return { statusCode: 200, body: JSON.stringify({ status: "sent", sessionId, emailAgent }) };
   } catch (err) {
     if (err.name === "GoneException") {
-      // Sesi sudah mati — beri tahu Hoiio supaya berhenti pakai sessionId ini
+      // Stale connection — tell Hoiio to drop this sessionId.
       return {
         statusCode: 410,
         body: JSON.stringify({ status: "session_gone", sessionId, emailAgent }),
       };
     }
-    console.error("ws-send error:", err);
+    console.error("ws-send error:", err.message);
     return { statusCode: 500, body: JSON.stringify({ error: "internal" }) };
   }
 };

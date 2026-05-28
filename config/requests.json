@@ -6,18 +6,18 @@
       "path": "<%= iparam.call_action_path %>",
       "headers": {
         "Content-Type": "application/json",
-        "X-API-Key": "<%= iparam.api_shared_secret %>"
+        "Authorization": "Bearer <%= iparam.tenant_token %>"
       }
     }
   },
   "getWsToken": {
     "schema": {
       "method": "POST",
-      "host": "<%= iparam.token_issuer_host %>",
-      "path": "<%= iparam.token_issuer_path %>",
+      "host": "<%= iparam.ws_issuer_host %>",
+      "path": "<%= iparam.ws_issuer_path %>",
       "headers": {
         "Content-Type": "application/json",
-        "X-API-Key": "<%= iparam.api_shared_secret %>"
+        "X-API-Key": "<%= iparam.tenant_token %>"
       }
     }
   }

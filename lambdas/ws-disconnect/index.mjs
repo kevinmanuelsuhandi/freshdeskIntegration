@@ -1,20 +1,12 @@
+// ============================================================================
+//  ws-disconnect  (API Gateway WebSocket $disconnect)
+// ----------------------------------------------------------------------------
+//  Stale sessionIds are cleaned up lazily on the Hoiio side when ws-send
+//  returns 410 (GoneException). No outbound call is made here.
+// ============================================================================
+
 export const handler = async (event) => {
-    const connectionId = event.requestContext.connectionId;
-    try {
-      await fetch(process.env.HOIIO_ENDPOINT, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${process.env.HOIIO_TOKEN}`,
-        },
-        body: JSON.stringify({
-          sessionId: connectionId,
-          state: "logout",
-          at: Date.now(),
-        }),
-      });
-    } catch (err) {
-      console.error("$disconnect error:", err);
-    }
-    return { statusCode: 200, body: "Disconnected" };
-  };
+  const { connectionId } = event.requestContext;
+  console.log("WebSocket $disconnect:", connectionId);
+  return { statusCode: 200, body: "Disconnected" };
+};

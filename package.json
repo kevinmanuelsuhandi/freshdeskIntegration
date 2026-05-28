@@ -1,12 +1,15 @@
 {
-  "name": "common-starter-template",
+  "name": "freshdesk-b3networks-integration",
   "version": "1.0.0",
-  "description": "Common starter template with vitest",
+  "description": "Freshdesk Custom App integrating with B3Networks (Hoiio) via AWS Lambda + WebSocket",
+  "scripts": {
+    "test": "vitest run --coverage"
+  },
   "dependencies": {},
   "devDependencies": {
-    "@vitest/coverage-v8": "~2.1.8",
-    "jsdom": "~26.1.0",
-    "vite": "~5.0.0",
-    "vitest": "~2.1.8"
+    "@vitest/coverage-v8": "2.1.9",
+    "jsdom": "26.1.0",
+    "vite": "5.4.21",
+    "vitest": "2.1.9"
   }
 }

@@ -1,32 +1,48 @@
 {
   "call_action_host": {
-    "display_name": "Call Action Host",
-    "description": "Host of the click-to-call endpoint for this tenant, e.g. portal.hoiio.net",
-    "type": "text",
-    "required": true
-  },
-  "call_action_path": {
-    "display_name": "Call Action Path",
-    "description": "Path of the click-to-call flow for this tenant, e.g. /_o/api/v2/flows/<id>/execute",
-    "type": "text",
-    "required": true
-  },
-  "token_issuer_host": {
-    "display_name": "Token Issuer Host",
-    "description": "Host of the ws-token-issuer Function URL, e.g. abc123.lambda-url.ap-southeast-1.on.aws",
-    "type": "text",
-    "required": true
-  },
-  "token_issuer_path": {
-    "display_name": "Token Issuer Path",
-    "description": "Path of the token issuer, usually just /",
+    "display_name": "Call Action Host (Hoiio)",
+    "description": "Hostname Hoiio untuk click-to-call, tanpa https:// prefix. Example: portal.hoiio.net",
     "type": "text",
     "required": true,
-    "default_value": "/"
+    "regex": {
+      "hostname_only": "^(?!https?:\\/\\/)[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$",
+      "hostname_only-error": "Hostname only without protocol (no https://) and no trailing slash"
+    }
   },
-  "api_shared_secret": {
-    "display_name": "API Shared Secret",
-    "description": "Per-tenant secret for click-to-call and token issuer. Stored encrypted; injected into the header; never exposed to the browser.",
+  "call_action_path": {
+    "display_name": "Call Action Path (Hoiio)",
+    "description": "Path Hoiio flow untuk click-to-call, dimulai dengan /. Example: /_o/api/v2/flows/<id>/execute",
+    "type": "text",
+    "required": true,
+    "regex": {
+      "starts_with_slash": "^/.*",
+      "starts_with_slash-error": "Path harus dimulai dengan /"
+    }
+  },
+  "ws_issuer_host": {
+    "display_name": "WebSocket Issuer Host (Lambda)",
+    "description": "Hostname Lambda ws-token-issuer Function URL, tanpa https:// prefix. Example: abc123.lambda-url.ap-southeast-1.on.aws",
+    "type": "text",
+    "required": true,
+    "regex": {
+      "hostname_only": "^(?!https?:\\/\\/)[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$",
+      "hostname_only-error": "Hostname only without protocol (no https://) and no trailing slash"
+    }
+  },
+  "ws_issuer_path": {
+    "display_name": "WebSocket Issuer Path",
+    "description": "Path WebSocket token issuer, biasanya hanya /",
+    "type": "text",
+    "required": true,
+    "default_value": "/",
+    "regex": {
+      "starts_with_slash": "^/.*",
+      "starts_with_slash-error": "Path harus dimulai dengan /"
+    }
+  },
+  "tenant_token": {
+    "display_name": "Tenant Token",
+    "description": "Token tenant ini. Dipakai sebagai Hoiio Bearer auth DAN sebagai X-API-Key ke ws-token-issuer Lambda. Stored encrypted.",
     "type": "text",
     "secure": true,
     "required": true

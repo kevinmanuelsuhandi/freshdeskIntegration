@@ -1,87 +1,44 @@
-# =========================
+# FDK build artifacts
+dist/
+.fdk/
+coverage/
 
-# macOS
+# FDK runtime logs (Finding #2)
+log/
+fdk.log
 
-# =========================
+# Node modules
+node_modules/
 
+# Lockfile: keep package-lock.json (Finding #5 - reproducible builds)
+yarn.lock
+
+# Environment & secrets — never commit
+.env
+.env.local
+.env.*.local
+*.env
+tenant-configs.json
+secrets.json
+*.pem
+*.key
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 .DS_Store
 
-# =========================
+# OS
+Thumbs.db
 
-# Node.js
-
-# =========================
-
-node_modules/
+# Logs
+*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# =========================
-
-# Build Output
-
-# =========================
-
-dist/
-coverage/
-
-# =========================
-
-# Logs
-
-# =========================
-
-log/
-logs/
-*.log
-
-# =========================
-
-# Environment Variables
-
-# =========================
-
-.env
-.env.*
-!.env.example
-
-# =========================
-
-# Freshworks / FDK
-
-# =========================
-
-.fdk/
-
-# =========================
-
-# Reports / Temporary Files
-
-# =========================
-
-.report.json
-.cache/
-tmp/
-
-# =========================
-
-# AWS / Security
-
-# =========================
-
-*.pem
-*.key
-
-# =========================
-
-# OS / Editor
-
-# =========================
-
-.vscode/
-.idea/
-
-# FDK runtime logs
-log/
-fdk.log
+# Test outputs
+/tmp/
+.nyc_output/

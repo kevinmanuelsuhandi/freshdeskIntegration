@@ -4,14 +4,8 @@
 //  Config model:
 //    - WS_URL is the same for all tenants -> hardcoded below.
 //    - Click-to-call host/path differ per tenant -> non-secure iparams.
-//    - Click-to-call secret -> SECURE iparam, injected into the request header
+//    - Tenant secret -> SECURE iparam, injected into the request header
 //      by the platform (config/requests.json). Never present in this file.
-//
-//  Security notes:
-//    - No request/response payloads are logged (avoids leaking agent PII).
-//    - BACKEND items still open: verify agent identity server-side (don't trust
-//      userEmail/userId from the body); use a short-lived token for the
-//      WebSocket $connect authorizer; emit structured logs to CloudWatch.
 // ============================================================================
 
 // Same WebSocket endpoint for every tenant.
@@ -19,6 +13,48 @@ const WS_URL = "wss://snsv14mr7l.execute-api.ap-southeast-1.amazonaws.com/produc
 
 const LOCK_NAME = "b3networks-freshdesk-ws-leader";
 const CHANNEL_NAME = "b3networks-freshdesk-channel";
+
+// --- Validation patterns -----------------------------------------------------
+const PHONE_REGEX = /^\+?[0-9\s\-()]{3,20}$/;
+const WS_TYPES = new Set(["whoami", "registered", "open_ticket", "error"]);
+const CHANNEL_TYPES = new Set(["session_update", "open_ticket"]);
+
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.length > 0 && v.length < 1024;
+}
+
+function isValidTicketId(v) {
+  if (typeof v === "number") return Number.isInteger(v) && v > 0;
+  if (typeof v === "string") return /^[0-9]{1,19}$/.test(v);
+  return false;
+}
+
+function isValidSessionId(v) {
+  return typeof v === "string" && /^[A-Za-z0-9_=-]{1,64}$/.test(v);
+}
+
+function isValidPhoneNumber(v) {
+  return typeof v === "string" && PHONE_REGEX.test(v);
+}
+
+// --- Structured logger -------------------------------------------------------
+const logger = {
+  _emit(level, event, fields) {
+    const entry = {
+      ts: new Date().toISOString(),
+      level,
+      event,
+      ...(fields || {}),
+    };
+    const line = JSON.stringify(entry);
+    if (level === "error") console.error(line);
+    else if (level === "warn") console.warn(line);
+    else console.log(line);
+  },
+  info(event, fields) { this._emit("info", event, fields); },
+  warn(event, fields) { this._emit("warn", event, fields); },
+  error(event, fields) { this._emit("error", event, fields); },
+};
 
 const state = {
   client: null,
@@ -53,30 +89,49 @@ async function init() {
     setupBroadcastChannel();
     setStatus("Freshdesk SDK ready. Waiting for app activation…");
   } catch (err) {
-    console.error("app.initialized failed:", err);
+    logger.error("app_initialized_failed", { error: err.message });
     setStatus("Failed to initialize Freshdesk SDK.", "error");
   }
 }
 
 function setupBroadcastChannel() {
   if (typeof BroadcastChannel === "undefined") {
-    console.warn("BroadcastChannel not supported.");
+    logger.warn("broadcast_channel_unsupported");
     return;
   }
   state.channel = new BroadcastChannel(CHANNEL_NAME);
   state.channel.onmessage = onChannelMessage;
 }
 
+function handleChannelSessionUpdate(msg) {
+  if (!isValidSessionId(msg.sessionId)) {
+    logger.warn("channel_invalid_session_id");
+    return;
+  }
+  setSessionId(msg.sessionId);
+  setStatus("Connected via leader tab.", "connected");
+}
+
+function handleChannelOpenTicket(msg) {
+  if (!isValidTicketId(msg.ticketId)) {
+    logger.warn("channel_invalid_ticket_id");
+    return;
+  }
+  openTicket(msg.ticketId);
+}
+
+const CHANNEL_HANDLERS = {
+  session_update: handleChannelSessionUpdate,
+  open_ticket: handleChannelOpenTicket,
+};
+
 function onChannelMessage(event) {
   const msg = event.data;
-  if (!msg || !msg.type) return;
-
-  if (msg.type === "session_update") {
-    setSessionId(msg.sessionId);
-    setStatus("Connected via leader tab.", "connected");
-  } else if (msg.type === "open_ticket") {
-    openTicket(msg.ticketId);
+  if (!msg || !CHANNEL_TYPES.has(msg.type)) {
+    logger.warn("channel_invalid_type", { type: msg && msg.type });
+    return;
   }
+  CHANNEL_HANDLERS[msg.type](msg);
 }
 
 function broadcast(msg) {
@@ -93,7 +148,6 @@ function extractAgentInfo(data) {
   };
 }
 
-// Validate activation prerequisites; returns an error string, or null if OK.
 function validateActivationData(agent, freshdeskDomain, iparams) {
   if (!agent.email) return "Could not read agent email.";
   if (!freshdeskDomain) return "Could not read Freshdesk domain.";
@@ -105,9 +159,6 @@ function validateActivationData(agent, freshdeskDomain, iparams) {
 
 async function onAppActivated() {
   try {
-    // iparams here are the NON-secure ones (call host/path). The secure secret
-    // is NOT returned by iparams.get(); it is injected by the platform at
-    // request time via config/requests.json.
     const [userData, domainData, iparams] = await Promise.all([
       state.client.data.get("loggedInUser"),
       state.client.data.get("domainName"),
@@ -128,10 +179,11 @@ async function onAppActivated() {
     state.agentId = agent.id;
     state.agentName = agent.name;
 
+    logger.info("agent_activated", { domain: state.freshdeskDomain });
     setStatus("Agent: " + agent.email + " on " + state.freshdeskDomain);
     requestLeadership();
   } catch (err) {
-    console.error("app.activated handler failed:", err);
+    logger.error("app_activated_failed", { error: err.message });
     setStatus("Failed to fetch agent or domain info.", "error");
   }
 }
@@ -144,7 +196,7 @@ async function holdLockForever() {
 
 function requestLeadership() {
   if (!navigator.locks) {
-    console.warn("Web Locks API not supported. Running standalone.");
+    logger.warn("web_locks_unsupported");
     becomeLeader();
     return;
   }
@@ -159,13 +211,11 @@ function requestLeadership() {
 
 function becomeLeader() {
   state.isLeader = true;
+  logger.info("became_leader");
   setStatus("Leader tab. Connecting WebSocket…");
   connectWebSocket();
 }
 
-// Fetch a short-lived (60s) WebSocket token via the secure Request method.
-// The per-tenant secret is injected into the header by the platform; it never
-// touches this code. Returns the token string, or null on failure.
 async function fetchWsToken() {
   try {
     const res = await state.client.request.invokeTemplate("getWsToken", {
@@ -178,17 +228,15 @@ async function fetchWsToken() {
     return data && data.token ? data.token : null;
   } catch (err) {
     const status = err && err.status ? err.status : "unknown";
+    logger.error("ws_token_fetch_failed", { status });
     setStatus("Could not get WS token (" + status + ").", "error");
     return null;
   }
 }
 
-// Acquire a fresh token, then open the WebSocket with it. Called on first
-// connect AND on every reconnect, because each token lives only 60 seconds.
 async function connectWebSocket() {
   const token = await fetchWsToken();
   if (!token) {
-    // Retry shortly; without a token we cannot connect.
     setTimeout(connectWebSocket, 3000);
     return;
   }
@@ -197,6 +245,7 @@ async function connectWebSocket() {
   state.ws = new WebSocket(url);
 
   state.ws.onopen = function () {
+    logger.info("ws_open");
     setStatus("Connected. Requesting session ID…");
     sendMessage({ action: "whoami" });
   };
@@ -206,88 +255,119 @@ async function connectWebSocket() {
     try {
       msg = JSON.parse(ev.data);
     } catch {
-      // Do NOT log ev.data — it may contain sensitive content.
-      console.warn("Discarded a non-JSON WebSocket frame.");
+      logger.warn("ws_non_json_frame");
       return;
     }
     handleServerMessage(msg);
   };
 
   state.ws.onerror = function () {
-    console.error("WebSocket error.");
+    logger.error("ws_error");
     setStatus("Connection error. Check console.", "error");
   };
 
   state.ws.onclose = function (ev) {
+    logger.warn("ws_closed", { code: ev.code });
     setStatus("Disconnected (code " + ev.code + "). Reconnecting…", "error");
-    // Reconnect with a fresh token (the old one is expired/single-use).
-    // Only the leader holds the socket, so only the leader reconnects.
     if (state.isLeader) {
       setTimeout(connectWebSocket, 2000);
     }
   };
 }
 
-function handleServerMessage(msg) {
-  if (msg.type === "whoami") {
-    setSessionId(msg.sessionId);
-    broadcast({ type: "session_update", sessionId: msg.sessionId });
-    // BACKEND item: the backend must VERIFY this identity rather than trust it.
-    sendMessage({
-      action: "register",
-      userEmail: state.agentEmail,
-      userId: state.agentId,
-      userName: state.agentName,
-      freshdeskDomain: state.freshdeskDomain,
-    });
-  } else if (msg.type === "registered") {
-    setStatus("Leader ready. Agent: " + msg.userEmail, "connected");
-  } else if (msg.type === "open_ticket") {
-    openTicket(msg.ticketId);
-    broadcast({ type: "open_ticket", ticketId: msg.ticketId });
-  } else if (msg.type === "error") {
-    setStatus("Server: " + msg.message, "error");
-  } else {
-    // Log only the message TYPE, never the full message (no PII).
-    console.log("Unhandled server message type:", msg && msg.type);
+function handleWsWhoami(msg) {
+  if (!isValidSessionId(msg.sessionId)) {
+    logger.warn("ws_invalid_session_id");
+    return;
   }
+  setSessionId(msg.sessionId);
+  broadcast({ type: "session_update", sessionId: msg.sessionId });
+  sendMessage({
+    action: "register",
+    userEmail: state.agentEmail,
+    userId: state.agentId,
+    userName: state.agentName,
+    freshdeskDomain: state.freshdeskDomain,
+  });
+}
+
+function handleWsRegistered(msg) {
+  if (!isNonEmptyString(msg.userEmail)) {
+    logger.warn("ws_invalid_register_email");
+    return;
+  }
+  logger.info("agent_registered");
+  setStatus("Leader ready. Agent: " + msg.userEmail, "connected");
+}
+
+function handleWsOpenTicket(msg) {
+  if (!isValidTicketId(msg.ticketId)) {
+    logger.warn("ws_invalid_ticket_id");
+    return;
+  }
+  openTicket(msg.ticketId);
+  broadcast({ type: "open_ticket", ticketId: msg.ticketId });
+}
+
+function handleWsError(msg) {
+  const safeMessage = isNonEmptyString(msg.message) ? msg.message.slice(0, 200) : "Unknown error";
+  logger.error("ws_server_error", { message: safeMessage });
+  setStatus("Server: " + safeMessage, "error");
+}
+
+const WS_HANDLERS = {
+  whoami: handleWsWhoami,
+  registered: handleWsRegistered,
+  open_ticket: handleWsOpenTicket,
+  error: handleWsError,
+};
+
+function handleServerMessage(msg) {
+  if (!msg || !WS_TYPES.has(msg.type)) {
+    logger.warn("ws_unknown_type", { type: msg && msg.type });
+    return;
+  }
+  WS_HANDLERS[msg.type](msg);
 }
 
 function sendMessage(payload) {
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     state.ws.send(JSON.stringify(payload));
   } else {
-    // Log only the action name, not the payload contents.
-    console.warn("WS not open, dropped action:", payload && payload.action);
+    logger.warn("ws_send_dropped", { action: payload && payload.action });
   }
 }
 
 function openTicket(ticketId) {
-  if (!ticketId || !state.client || !state.client.interface) return;
+  if (!isValidTicketId(ticketId) || !state.client || !state.client.interface) return;
   state.client.interface
     .trigger("click", { id: "ticket", value: String(ticketId) })
     .then(function () {
+      logger.info("ticket_opened", { ticketId });
       setStatus("Opened ticket #" + ticketId, "connected");
     })
     .catch(function (err) {
-      setStatus(
-        "Failed to open ticket #" + ticketId + ": " + err.message,
-        "error"
-      );
+      logger.error("ticket_open_failed", { ticketId, error: err.message });
+      setStatus("Failed to open ticket #" + ticketId, "error");
     });
+}
+
+function isAgentReady() {
+  return Boolean(state.agentEmail && state.agentId && state.freshdeskDomain);
 }
 
 function getCallablePhoneNumber(event) {
   const data = event.helper.getData();
   const phoneNumber = data && data.number ? String(data.number) : null;
   if (!phoneNumber) return null;
-  if (!state.agentEmail || !state.agentId || !state.freshdeskDomain) return null;
+  if (!isValidPhoneNumber(phoneNumber)) {
+    logger.warn("call_invalid_phone_format");
+    return null;
+  }
+  if (!isAgentReady()) return null;
   return phoneNumber;
 }
 
-// Forward the call request via the SECURE Request method. The X-API-Key header
-// is injected by the platform from the secure iparam (config/requests.json);
-// it never appears in this code or in the browser.
 async function postCallRequest(phoneNumber) {
   const body = {
     userId: state.agentId,
@@ -301,11 +381,11 @@ async function postCallRequest(phoneNumber) {
     await state.client.request.invokeTemplate("clickToCall", {
       body: JSON.stringify(body),
     });
+    logger.info("call_initiated");
     return true;
   } catch (err) {
-    // invokeTemplate rejects on non-2xx. Log status only, not the payload.
-    const status =
-      err && err.status ? err.status : err && err.code ? err.code : "unknown";
+    const status = err && err.status ? err.status : err && err.code ? err.code : "unknown";
+    logger.error("call_failed", { status });
     setStatus("Call failed (" + status + ").", "error");
     return false;
   }
@@ -326,7 +406,8 @@ async function onTriggerDialer(event) {
       setStatus("Call initiated to " + phoneNumber, "connected");
     }
   } catch (err) {
-    setStatus("Call error: " + err.message, "error");
+    logger.error("call_error", { error: err.message });
+    setStatus("Call error.", "error");
   }
 }
 
