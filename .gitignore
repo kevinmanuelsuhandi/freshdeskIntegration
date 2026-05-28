@@ -81,3 +81,7 @@ tmp/
 
 .vscode/
 .idea/
+
+# FDK runtime logs
+log/
+fdk.log
