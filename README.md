@@ -199,7 +199,3 @@ ws-token-issuer and ws-authorizer, and that the token has not expired.
 ## License
 
 Internal use only.
-
-## Contact
-
-Kevin Manuel S — B3Networks
