@@ -1,0 +1,24 @@
+{
+  "clickToCall": {
+    "schema": {
+      "method": "POST",
+      "host": "<%= iparam.call_action_host %>",
+      "path": "<%= iparam.call_action_path %>",
+      "headers": {
+        "Content-Type": "application/json",
+        "X-API-Key": "<%= iparam.api_shared_secret %>"
+      }
+    }
+  },
+  "getWsToken": {
+    "schema": {
+      "method": "POST",
+      "host": "<%= iparam.token_issuer_host %>",
+      "path": "<%= iparam.token_issuer_path %>",
+      "headers": {
+        "Content-Type": "application/json",
+        "X-API-Key": "<%= iparam.api_shared_secret %>"
+      }
+    }
+  }
+}

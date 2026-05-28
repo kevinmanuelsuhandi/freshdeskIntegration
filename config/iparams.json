@@ -1,1 +1,34 @@
-{}
+{
+  "call_action_host": {
+    "display_name": "Call Action Host",
+    "description": "Host of the click-to-call endpoint for this tenant, e.g. portal.hoiio.net",
+    "type": "text",
+    "required": true
+  },
+  "call_action_path": {
+    "display_name": "Call Action Path",
+    "description": "Path of the click-to-call flow for this tenant, e.g. /_o/api/v2/flows/<id>/execute",
+    "type": "text",
+    "required": true
+  },
+  "token_issuer_host": {
+    "display_name": "Token Issuer Host",
+    "description": "Host of the ws-token-issuer Function URL, e.g. abc123.lambda-url.ap-southeast-1.on.aws",
+    "type": "text",
+    "required": true
+  },
+  "token_issuer_path": {
+    "display_name": "Token Issuer Path",
+    "description": "Path of the token issuer, usually just /",
+    "type": "text",
+    "required": true,
+    "default_value": "/"
+  },
+  "api_shared_secret": {
+    "display_name": "API Shared Secret",
+    "description": "Per-tenant secret for click-to-call and token issuer. Stored encrypted; injected into the header; never exposed to the browser.",
+    "type": "text",
+    "secure": true,
+    "required": true
+  }
+}

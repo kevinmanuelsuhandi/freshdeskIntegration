@@ -1,19 +1,83 @@
-# FDK local & build artifacts
-.fdk/
+# =========================
+
+# macOS
+
+# =========================
+
+.DS_Store
+
+# =========================
+
+# Node.js
+
+# =========================
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =========================
+
+# Build Output
+
+# =========================
+
 dist/
 coverage/
 
-# Node
-node_modules/
-npm-debug.log*
+# =========================
 
-# Local config / secrets (jangan commit)
-config/iparam_test_data.json
+# Logs
+
+# =========================
+
+log/
+logs/
+*.log
+
+# =========================
+
+# Environment Variables
+
+# =========================
+
 .env
 .env.*
+!.env.example
 
-# OS / editor
-.DS_Store
+# =========================
+
+# Freshworks / FDK
+
+# =========================
+
+.fdk/
+
+# =========================
+
+# Reports / Temporary Files
+
+# =========================
+
+.report.json
+.cache/
+tmp/
+
+# =========================
+
+# AWS / Security
+
+# =========================
+
+*.pem
+*.key
+
+# =========================
+
+# OS / Editor
+
+# =========================
+
 .vscode/
 .idea/
-*.swp

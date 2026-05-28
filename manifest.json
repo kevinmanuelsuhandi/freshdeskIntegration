@@ -7,6 +7,10 @@
           "url": "index.html",
           "icon": "styles/images/icon.svg"
         }
+      },
+      "requests": {
+        "clickToCall": {},
+        "getWsToken": {}
       }
     },
     "support_ticket": {}

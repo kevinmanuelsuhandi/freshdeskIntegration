@@ -1,73 +1,54 @@
 // ============================================================================
 //  Custom App for B3Networks & Freshdesk Integration
 // ----------------------------------------------------------------------------
-//  Runs inside the Freshdesk agent workspace. Responsibilities:
-//    1. Identify the logged-in agent and the Freshdesk tenant (domain).
-//    2. Elect a single "leader" tab so only ONE WebSocket exists per agent,
-//       even when multiple Freshdesk tabs are open.
-//    3. Connect the WebSocket, register the agent <-> session mapping with the
-//       backend, and share session info with follower tabs.
-//    4. Handle click-to-call by forwarding the request to the backend.
-//    5. Open tickets when the server pushes an "open_ticket" event.
+//  Config model:
+//    - WS_URL is the same for all tenants -> hardcoded below.
+//    - Click-to-call host/path differ per tenant -> non-secure iparams.
+//    - Click-to-call secret -> SECURE iparam, injected into the request header
+//      by the platform (config/requests.json). Never present in this file.
+//
+//  Security notes:
+//    - No request/response payloads are logged (avoids leaking agent PII).
+//    - BACKEND items still open: verify agent identity server-side (don't trust
+//      userEmail/userId from the body); use a short-lived token for the
+//      WebSocket $connect authorizer; emit structured logs to CloudWatch.
 // ============================================================================
 
-// Shared secret. Compile-time constant. NOT real security, but blocks scans/bots.
-// Rotate by regenerating + redeploying frontend + Lambda env vars together.
-// (Placeholder here — the real value is injected at build time, never committed.)
-const API_SHARED_SECRET = "YOUR_SHARED_SECRET";
+// Same WebSocket endpoint for every tenant.
+const WS_URL = "wss://snsv14mr7l.execute-api.ap-southeast-1.amazonaws.com/production";
 
-// WebSocket URL with the shared secret appended as a query-string token, which
-// the API Gateway Lambda authorizer validates on $connect.
-const WS_URL = "WSS_URL" + encodeURIComponent(API_SHARED_SECRET);
-
-// HTTPS endpoint (Hoiio programmable flow) that initiates a click-to-call.
-const CALL_ACTION_URL = "PROGRAMMABLE_FLOW_OPEN_API";
-
-// Logical name for the Web Locks API lock used in leader election.
 const LOCK_NAME = "b3networks-freshdesk-ws-leader";
-// Logical name for the BroadcastChannel used for cross-tab messaging.
 const CHANNEL_NAME = "b3networks-freshdesk-channel";
 
-// Runtime application state, populated during init/activation.
 const state = {
-  client: null,          // Freshworks SDK client instance
-  ws: null,              // active WebSocket (leader tab only)
-  agentEmail: null,      // logged-in agent email
-  agentId: null,         // logged-in agent id
-  agentName: null,       // logged-in agent name
-  freshdeskDomain: null, // tenant domain; drives per-tenant backend routing
-  sessionId: null,       // API Gateway connectionId for this socket
-  isLeader: false,       // true if this tab owns the WebSocket connection
-  channel: null,         // BroadcastChannel instance for cross-tab messaging
+  client: null,
+  ws: null,
+  agentEmail: null,
+  agentId: null,
+  agentName: null,
+  freshdeskDomain: null,
+  sessionId: null,
+  isLeader: false,
+  channel: null,
 };
 
-// Cached DOM references for the small status UI.
 const $sessionId = document.getElementById("sessionId");
 const $status = document.getElementById("status");
 
-// Update the visible status line. `kind` toggles a CSS modifier class.
 function setStatus(text, kind) {
   $status.textContent = text;
   $status.className = "status" + (kind ? " " + kind : "");
 }
 
-// Store and display the current session id (em dash when empty).
 function setSessionId(id) {
   state.sessionId = id;
   $sessionId.textContent = id || "—";
 }
 
-// ---------------------------------------------------------------------------
-//  Initialization
-// ---------------------------------------------------------------------------
-
-// Entry point: initialize the Freshworks SDK and register event listeners.
 async function init() {
   try {
     state.client = await app.initialized();
-    // Fired when the app becomes active in the agent workspace.
     state.client.events.on("app.activated", onAppActivated);
-    // Freshdesk telephony event: fired when the agent clicks a phone number.
     state.client.events.on("cti.triggerDialer", onTriggerDialer);
     setupBroadcastChannel();
     setStatus("Freshdesk SDK ready. Waiting for app activation…");
@@ -77,8 +58,6 @@ async function init() {
   }
 }
 
-// Set up the cross-tab channel so follower tabs receive session updates and
-// "open ticket" instructions from the leader tab.
 function setupBroadcastChannel() {
   if (typeof BroadcastChannel === "undefined") {
     console.warn("BroadcastChannel not supported.");
@@ -88,27 +67,22 @@ function setupBroadcastChannel() {
   state.channel.onmessage = onChannelMessage;
 }
 
-// Handle messages broadcast from the leader tab to follower tabs.
 function onChannelMessage(event) {
   const msg = event.data;
   if (!msg || !msg.type) return;
 
   if (msg.type === "session_update") {
-    // Leader shares its session id so followers display the same value.
     setSessionId(msg.sessionId);
     setStatus("Connected via leader tab.", "connected");
   } else if (msg.type === "open_ticket") {
-    // Leader relays an open-ticket instruction.
     openTicket(msg.ticketId);
   }
 }
 
-// Send a message to all other tabs (no-op if BroadcastChannel is unavailable).
 function broadcast(msg) {
   if (state.channel) state.channel.postMessage(msg);
 }
 
-// Normalize the loggedInUser payload into a flat agent object.
 function extractAgentInfo(data) {
   const lu = data && data.loggedInUser ? data.loggedInUser : {};
   const contact = lu.contact || {};
@@ -119,29 +93,34 @@ function extractAgentInfo(data) {
   };
 }
 
-// ---------------------------------------------------------------------------
-//  App activation: read agent + tenant context, then start leader election
-// ---------------------------------------------------------------------------
+// Validate activation prerequisites; returns an error string, or null if OK.
+function validateActivationData(agent, freshdeskDomain, iparams) {
+  if (!agent.email) return "Could not read agent email.";
+  if (!freshdeskDomain) return "Could not read Freshdesk domain.";
+  if (!iparams || !iparams.call_action_host || !iparams.call_action_path) {
+    return "Click-to-call endpoint is not configured (iparams).";
+  }
+  return null;
+}
 
 async function onAppActivated() {
   try {
-    // Fetch agent info and tenant domain in parallel.
-    const [userData, domainData] = await Promise.all([
+    // iparams here are the NON-secure ones (call host/path). The secure secret
+    // is NOT returned by iparams.get(); it is injected by the platform at
+    // request time via config/requests.json.
+    const [userData, domainData, iparams] = await Promise.all([
       state.client.data.get("loggedInUser"),
       state.client.data.get("domainName"),
+      state.client.iparams.get(),
     ]);
 
     const agent = extractAgentInfo(userData);
     state.freshdeskDomain =
       domainData && domainData.domainName ? domainData.domainName : null;
 
-    // Both the agent email and the tenant domain are required to proceed.
-    if (!agent.email) {
-      setStatus("Could not read agent email.", "error");
-      return;
-    }
-    if (!state.freshdeskDomain) {
-      setStatus("Could not read Freshdesk domain.", "error");
+    const error = validateActivationData(agent, state.freshdeskDomain, iparams);
+    if (error) {
+      setStatus(error, "error");
       return;
     }
 
@@ -157,21 +136,12 @@ async function onAppActivated() {
   }
 }
 
-// ---------------------------------------------------------------------------
-//  Leader election (one WebSocket per agent across multiple tabs)
-// ---------------------------------------------------------------------------
-
-// Hold the lock indefinitely. While this promise stays unresolved, the Web
-// Locks API keeps this tab as the lock owner (the leader). The lock is released
-// automatically when the tab closes, letting a follower take over.
 async function holdLockForever() {
   await new Promise(function keepLockHeld(resolve) {
     state._lockReleaser = resolve;
   });
 }
 
-// Try to become the leader tab. If the Web Locks API is unavailable, fall back
-// to running standalone (each tab connects on its own).
 function requestLeadership() {
   if (!navigator.locks) {
     console.warn("Web Locks API not supported. Running standalone.");
@@ -179,8 +149,6 @@ function requestLeadership() {
     return;
   }
 
-  // The callback runs only for the tab that acquires the lock; other tabs queue
-  // and remain followers until the leader releases it (i.e. its tab closes).
   navigator.locks.request(LOCK_NAME, async function onLockAcquired() {
     becomeLeader();
     await holdLockForever();
@@ -189,23 +157,47 @@ function requestLeadership() {
   setStatus("Running as follower tab.", "connected");
 }
 
-// Promote this tab to leader and open the WebSocket connection.
 function becomeLeader() {
   state.isLeader = true;
   setStatus("Leader tab. Connecting WebSocket…");
   connectWebSocket();
 }
 
-// ---------------------------------------------------------------------------
-//  WebSocket connection (leader tab only)
-// ---------------------------------------------------------------------------
+// Fetch a short-lived (60s) WebSocket token via the secure Request method.
+// The per-tenant secret is injected into the header by the platform; it never
+// touches this code. Returns the token string, or null on failure.
+async function fetchWsToken() {
+  try {
+    const res = await state.client.request.invokeTemplate("getWsToken", {
+      body: JSON.stringify({
+        freshdeskDomain: state.freshdeskDomain,
+        userEmail: state.agentEmail,
+      }),
+    });
+    const data = JSON.parse(res.response);
+    return data && data.token ? data.token : null;
+  } catch (err) {
+    const status = err && err.status ? err.status : "unknown";
+    setStatus("Could not get WS token (" + status + ").", "error");
+    return null;
+  }
+}
 
-function connectWebSocket() {
-  state.ws = new WebSocket(WS_URL);
+// Acquire a fresh token, then open the WebSocket with it. Called on first
+// connect AND on every reconnect, because each token lives only 60 seconds.
+async function connectWebSocket() {
+  const token = await fetchWsToken();
+  if (!token) {
+    // Retry shortly; without a token we cannot connect.
+    setTimeout(connectWebSocket, 3000);
+    return;
+  }
+
+  const url = WS_URL + "?token=" + encodeURIComponent(token);
+  state.ws = new WebSocket(url);
 
   state.ws.onopen = function () {
     setStatus("Connected. Requesting session ID…");
-    // Ask the server for our connectionId (used as the session id).
     sendMessage({ action: "whoami" });
   };
 
@@ -213,32 +205,34 @@ function connectWebSocket() {
     let msg;
     try {
       msg = JSON.parse(ev.data);
-    } catch (e) {
-      // Ignore any non-JSON frames defensively.
-      console.warn("Non-JSON message:", ev.data, e);
+    } catch {
+      // Do NOT log ev.data — it may contain sensitive content.
+      console.warn("Discarded a non-JSON WebSocket frame.");
       return;
     }
     handleServerMessage(msg);
   };
 
-  state.ws.onerror = function (err) {
-    console.error("WebSocket error:", err);
+  state.ws.onerror = function () {
+    console.error("WebSocket error.");
     setStatus("Connection error. Check console.", "error");
   };
 
   state.ws.onclose = function (ev) {
-    // Show the close code; 1006 typically means the authorizer rejected us.
-    setStatus("Disconnected (code " + ev.code + ").", "error");
+    setStatus("Disconnected (code " + ev.code + "). Reconnecting…", "error");
+    // Reconnect with a fresh token (the old one is expired/single-use).
+    // Only the leader holds the socket, so only the leader reconnects.
+    if (state.isLeader) {
+      setTimeout(connectWebSocket, 2000);
+    }
   };
 }
 
-// Route inbound server messages to the appropriate action.
 function handleServerMessage(msg) {
   if (msg.type === "whoami") {
-    // Server returned our session id; display it and share with followers.
     setSessionId(msg.sessionId);
     broadcast({ type: "session_update", sessionId: msg.sessionId });
-    // Register the agent <-> session mapping with the backend.
+    // BACKEND item: the backend must VERIFY this identity rather than trust it.
     sendMessage({
       action: "register",
       userEmail: state.agentEmail,
@@ -247,33 +241,27 @@ function handleServerMessage(msg) {
       freshdeskDomain: state.freshdeskDomain,
     });
   } else if (msg.type === "registered") {
-    // Backend confirmed the mapping is stored.
     setStatus("Leader ready. Agent: " + msg.userEmail, "connected");
   } else if (msg.type === "open_ticket") {
-    // Server asked us to open a ticket; do it and relay to other tabs.
     openTicket(msg.ticketId);
     broadcast({ type: "open_ticket", ticketId: msg.ticketId });
   } else if (msg.type === "error") {
     setStatus("Server: " + msg.message, "error");
   } else {
-    console.log("Server message:", msg);
+    // Log only the message TYPE, never the full message (no PII).
+    console.log("Unhandled server message type:", msg && msg.type);
   }
 }
 
-// Send a JSON message over the WebSocket if the socket is open.
 function sendMessage(payload) {
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     state.ws.send(JSON.stringify(payload));
   } else {
-    console.warn("WS not open, dropping:", payload);
+    // Log only the action name, not the payload contents.
+    console.warn("WS not open, dropped action:", payload && payload.action);
   }
 }
 
-// ---------------------------------------------------------------------------
-//  Ticket navigation
-// ---------------------------------------------------------------------------
-
-// Navigate the agent to a specific ticket via the Freshdesk interface API.
 function openTicket(ticketId) {
   if (!ticketId || !state.client || !state.client.interface) return;
   state.client.interface
@@ -289,12 +277,6 @@ function openTicket(ticketId) {
     });
 }
 
-// ---------------------------------------------------------------------------
-//  Click-to-call
-// ---------------------------------------------------------------------------
-
-// Validate the telephony event and return a callable phone number, or null if
-// the number is missing or the agent context is not ready.
 function getCallablePhoneNumber(event) {
   const data = event.helper.getData();
   const phoneNumber = data && data.number ? String(data.number) : null;
@@ -303,33 +285,32 @@ function getCallablePhoneNumber(event) {
   return phoneNumber;
 }
 
-// Forward the call request to the backend (Hoiio flow) over HTTPS.
-// Returns true on success, false on a non-2xx response.
+// Forward the call request via the SECURE Request method. The X-API-Key header
+// is injected by the platform from the secure iparam (config/requests.json);
+// it never appears in this code or in the browser.
 async function postCallRequest(phoneNumber) {
-  const res = await fetch(CALL_ACTION_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-API-Key": API_SHARED_SECRET,
-    },
-    body: JSON.stringify({
-      userId: state.agentId,
-      userEmail: state.agentEmail,
-      phoneNumber: phoneNumber,
-      freshdeskDomain: state.freshdeskDomain,
-      state: "clickToCall",
-    }),
-  });
+  const body = {
+    userId: state.agentId,
+    userEmail: state.agentEmail,
+    phoneNumber: phoneNumber,
+    freshdeskDomain: state.freshdeskDomain,
+    state: "clickToCall",
+  };
 
-  if (!res.ok) {
-    const errText = await res.text();
-    setStatus("Call failed (" + res.status + "): " + errText.slice(0, 80), "error");
+  try {
+    await state.client.request.invokeTemplate("clickToCall", {
+      body: JSON.stringify(body),
+    });
+    return true;
+  } catch (err) {
+    // invokeTemplate rejects on non-2xx. Log status only, not the payload.
+    const status =
+      err && err.status ? err.status : err && err.code ? err.code : "unknown";
+    setStatus("Call failed (" + status + ").", "error");
     return false;
   }
-  return true;
 }
 
-// Handler for the Freshdesk dialer event (agent clicked a phone number).
 async function onTriggerDialer(event) {
   const phoneNumber = getCallablePhoneNumber(event);
   if (!phoneNumber) {
@@ -349,5 +330,4 @@ async function onTriggerDialer(event) {
   }
 }
 
-// Kick everything off once the DOM is ready.
 document.addEventListener("DOMContentLoaded", init);
