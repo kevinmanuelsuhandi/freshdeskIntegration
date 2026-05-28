@@ -2,15 +2,16 @@
 dist/
 .fdk/
 coverage/
+.report.json
 
-# FDK runtime logs (Finding #2)
+# FDK runtime logs
 log/
 fdk.log
 
 # Node modules
 node_modules/
 
-# Lockfile: keep package-lock.json (Finding #5 - reproducible builds)
+# Lockfile: keep package-lock.json (reproducible builds)
 yarn.lock
 
 # Environment & secrets — never commit
@@ -28,9 +29,9 @@ secrets.json
 .idea/
 *.swp
 *.swo
-.DS_Store
 
 # OS
+.DS_Store
 Thumbs.db
 
 # Logs
