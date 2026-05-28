@@ -391,6 +391,39 @@ async function postCallRequest(phoneNumber) {
   }
 }
 
+// Throttle untuk cegah accidental atau malicious rapid-fire calls.
+// Window: max 1 call per 3 detik; max 10 call per menit.
+const CALL_MIN_GAP_MS = 3000;
+const CALL_RATE_WINDOW_MS = 60000;
+const CALL_RATE_MAX = 10;
+const callHistory = [];
+
+function isCallAllowed() {
+  const now = Date.now();
+  // Min gap antar call
+  if (callHistory.length > 0) {
+    const lastCall = callHistory[callHistory.length - 1];
+    if (now - lastCall < CALL_MIN_GAP_MS) {
+      return { allowed: false, reason: "too_soon" };
+    }
+  }
+  // Rolling window
+  const recentCalls = callHistory.filter((t) => now - t < CALL_RATE_WINDOW_MS);
+  if (recentCalls.length >= CALL_RATE_MAX) {
+    return { allowed: false, reason: "rate_exceeded" };
+  }
+  return { allowed: true };
+}
+
+function recordCall() {
+  const now = Date.now();
+  callHistory.push(now);
+  // Cleanup old entries to prevent unbounded growth
+  while (callHistory.length > 0 && now - callHistory[0] > CALL_RATE_WINDOW_MS) {
+    callHistory.shift();
+  }
+}
+
 async function onTriggerDialer(event) {
   const phoneNumber = getCallablePhoneNumber(event);
   if (!phoneNumber) {
@@ -398,6 +431,17 @@ async function onTriggerDialer(event) {
     return;
   }
 
+  const check = isCallAllowed();
+  if (!check.allowed) {
+    logger.warn("call_throttled", { reason: check.reason });
+    const msg = check.reason === "too_soon"
+      ? "Please wait before calling again."
+      : "Call rate limit reached. Try again later.";
+    setStatus(msg, "error");
+    return;
+  }
+
+  recordCall();
   setStatus("Calling " + phoneNumber + "…");
 
   try {
