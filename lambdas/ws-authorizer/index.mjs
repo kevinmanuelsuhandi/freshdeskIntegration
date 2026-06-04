@@ -2,16 +2,31 @@
 //  ws-authorizer  (API Gateway WebSocket $connect authorizer)
 // ----------------------------------------------------------------------------
 //  Verifies the short-lived JWT passed as ?token=<jwt> on $connect.
-//  Replaces the old static-secret check. A leaked token is useless after 60s.
+//
+//  VAPT closures in this file:
+//    - Finding 5: structured JSON logging on ALL paths, including denies.
+//      Previously the deny path returned silently — auditor flagged this as
+//      "zero audit trail for auth failures".
 //
 //  Env vars:
 //    JWT_SIGNING_KEY  must match ws-token-issuer's signing key
 // ============================================================================
 import crypto from "node:crypto";
 
+function log(level, event, fields = {}) {
+  console.log(
+    JSON.stringify({
+      ts: new Date().toISOString(),
+      level,
+      event,
+      ...fields,
+    })
+  );
+}
+
 function verifyJwt(token, key) {
   const parts = token.split(".");
-  if (parts.length !== 3) return null;
+  if (parts.length !== 3) return { ok: false, reason: "malformed" };
   const [h, p, sig] = parts;
   const expected = crypto
     .createHmac("sha256", key)
@@ -21,22 +36,23 @@ function verifyJwt(token, key) {
     .replace(/\+/g, "-")
     .replace(/\//g, "_");
 
-  // Constant-time comparison to avoid timing attacks.
   const a = Buffer.from(sig);
   const b = Buffer.from(expected);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return { ok: false, reason: "bad_signature" };
+  }
 
   let payload;
   try {
     payload = JSON.parse(Buffer.from(p, "base64").toString("utf8"));
   } catch {
-    return null;
+    return { ok: false, reason: "bad_payload" };
   }
 
   const now = Math.floor(Date.now() / 1000);
-  if (payload.exp && now > payload.exp) return null; // expired
-  if (payload.nbf && now < payload.nbf) return null; // not yet valid
-  return payload;
+  if (payload.exp && now > payload.exp) return { ok: false, reason: "expired" };
+  if (payload.nbf && now < payload.nbf) return { ok: false, reason: "not_yet_valid" };
+  return { ok: true, payload };
 }
 
 function allow(principalId, resource, context) {
@@ -65,23 +81,39 @@ function deny(resource) {
 }
 
 export const handler = async (event) => {
-  const key = process.env.JWT_SIGNING_KEY;
+  const sourceIp =
+    (event.requestContext && event.requestContext.identity &&
+      event.requestContext.identity.sourceIp) ||
+    "unknown";
   const resource = event.methodArn;
+
+  const key = process.env.JWT_SIGNING_KEY;
+  if (!key) {
+    log("error", "authorizer_misconfigured", { sourceIp, reason: "no_signing_key" });
+    return deny(resource);
+  }
 
   const token =
     (event.queryStringParameters && event.queryStringParameters.token) || "";
-  if (!token || !key) {
+  if (!token) {
+    log("warn", "authorizer_denied", { sourceIp, reason: "missing_token" });
     return deny(resource);
   }
 
-  const payload = verifyJwt(token, key);
-  if (!payload) {
+  const result = verifyJwt(token, key);
+  if (!result.ok) {
+    log("warn", "authorizer_denied", { sourceIp, reason: result.reason });
     return deny(resource);
   }
 
-  // Pass verified identity to downstream routes via the authorizer context.
-  return allow(payload.sub || "agent", resource, {
-    agentEmail: payload.sub || "",
-    freshdeskDomain: payload.domain || "",
+  log("info", "authorizer_allowed", {
+    sourceIp,
+    sub: result.payload.sub,
+    domain: result.payload.domain,
+  });
+
+  return allow(result.payload.sub || "agent", resource, {
+    agentEmail: result.payload.sub || "",
+    freshdeskDomain: result.payload.domain || "",
   });
 };
