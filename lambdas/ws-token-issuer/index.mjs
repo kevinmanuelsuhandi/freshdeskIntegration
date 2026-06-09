@@ -1,43 +1,39 @@
 // ============================================================================
-//  ws-token-issuer  (Lambda Function URL, auth: NONE)
+//  ws-token-issuer  (Lambda Function URL)
 // ----------------------------------------------------------------------------
-//  Issues a short-lived (60s) JWT used by the frontend to open the WebSocket.
-//  Called via the Freshworks Request method, so the per-tenant secret is
-//  injected into the X-API-Key header by the platform.
-//
-//  Security:
-//    - VAPT Finding 2 (mitigation): userEmail must pass a format check; the
-//      previous `userEmail || "unknown"` fallback is removed. This raises the
-//      bar — random/blank impersonation no longer works. Full closure of
-//      impersonation requires cross-checking the email against Freshdesk's
-//      agent list (Option 3 in the design notes); not implemented here.
-//    - VAPT Finding 4: schema-shape validation on body before logic.
-//    - VAPT Finding 5: structured JSON logging on all branches.
-//
-//  Env vars:
-//    TENANT_CONFIGS   JSON: { "<domain>": { "token": "<tenant secret>" }, ... }
-//    JWT_SIGNING_KEY  random long string used to sign/verify the short JWT
+//  Frontend calls this via Freshworks Request method to obtain a 60s JWT.
+//  Per-tenant secret (issuerApiKey) from Parameter Store, sent in standard
+//  `Authorization: Bearer <token>` header.
 // ============================================================================
 import crypto from "node:crypto";
+import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 
 const TOKEN_TTL_SECONDS = 60;
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
-// Pragmatic email regex: not RFC-perfect, but rejects the obvious cases
-// (empty, no @, no dot, whitespace, control chars) that the VAPT cares about.
+const ssm = new SSMClient({});
+const cache = new Map();
+
+async function getSecret(name) {
+  const hit = cache.get(name);
+  if (hit && Date.now() < hit.expiresAt) return hit.value;
+  try {
+    const res = await ssm.send(
+      new GetParameterCommand({ Name: name, WithDecryption: true })
+    );
+    cache.set(name, { value: res.Parameter.Value, expiresAt: Date.now() + CACHE_TTL_MS });
+    return res.Parameter.Value;
+  } catch (err) {
+    if (err && err.name === "ParameterNotFound") return null;
+    throw err;
+  }
+}
+
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-// Hostname check (RFC 1123-ish) for freshdeskDomain.
 const HOST_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
 
 function log(level, event, fields = {}) {
-  console.log(
-    JSON.stringify({
-      ts: new Date().toISOString(),
-      level,
-      event,
-      ...fields,
-    })
-  );
+  console.log(JSON.stringify({ ts: new Date().toISOString(), level, event, ...fields }));
 }
 
 function reply(status, body) {
@@ -48,31 +44,18 @@ function reply(status, body) {
   };
 }
 
-// --- Minimal HS256 JWT (no external dependency) ---
 function b64url(input) {
-  return Buffer.from(input)
-    .toString("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
+  return Buffer.from(input).toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 
 function signJwt(payload, key) {
   const header = { alg: "HS256", typ: "JWT" };
-  const h = b64url(JSON.stringify(header));
-  const p = b64url(JSON.stringify(payload));
-  const data = `${h}.${p}`;
-  const sig = crypto
-    .createHmac("sha256", key)
-    .update(data)
-    .digest("base64")
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
+  const data = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}`;
+  const sig = crypto.createHmac("sha256", key).update(data).digest("base64")
+    .replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
   return `${data}.${sig}`;
 }
 
-// Constant-time comparison for the tenant secret.
 function secretMatches(provided, expected) {
   if (!provided || !expected) return false;
   const a = Buffer.from(provided);
@@ -81,49 +64,31 @@ function secretMatches(provided, expected) {
   return crypto.timingSafeEqual(a, b);
 }
 
+function extractBearer(headers) {
+  const raw = headers.authorization || headers.Authorization || "";
+  const match = /^Bearer\s+(.+)$/i.exec(raw.trim());
+  return match ? match[1].trim() : null;
+}
+
 function validateInput(body) {
   if (!body || typeof body !== "object") return "invalid body";
-
-  if (typeof body.freshdeskDomain !== "string" || body.freshdeskDomain.length > 255) {
-    return "freshdeskDomain must be a string under 255 chars";
-  }
-  if (!HOST_RE.test(body.freshdeskDomain)) {
-    return "freshdeskDomain has invalid format";
-  }
-
-  // userEmail is REQUIRED now — no fallback to "unknown".
-  if (typeof body.userEmail !== "string" || body.userEmail.length === 0 || body.userEmail.length > 254) {
-    return "userEmail required (string, 1-254 chars)";
-  }
-  if (!EMAIL_RE.test(body.userEmail)) {
-    return "userEmail has invalid format";
-  }
-
+  if (typeof body.freshdeskDomain !== "string" || body.freshdeskDomain.length > 255) return "freshdeskDomain must be a string under 255 chars";
+  if (!HOST_RE.test(body.freshdeskDomain)) return "freshdeskDomain has invalid format";
+  if (typeof body.userEmail !== "string" || body.userEmail.length === 0 || body.userEmail.length > 254) return "userEmail required";
+  if (!EMAIL_RE.test(body.userEmail)) return "userEmail has invalid format";
   return null;
 }
 
 export const handler = async (event) => {
   const sourceIp =
-    (event.requestContext &&
-      event.requestContext.http &&
-      event.requestContext.http.sourceIp) ||
-    "unknown";
+    (event.requestContext && event.requestContext.http && event.requestContext.http.sourceIp) || "unknown";
 
-  // --- Misconfiguration checks ---
-  let tenantConfigs;
-  try {
-    tenantConfigs = JSON.parse(process.env.TENANT_CONFIGS || "{}");
-  } catch {
-    log("error", "issuer_misconfigured", { sourceIp, reason: "bad_tenant_configs" });
-    return reply(500, { error: "server misconfigured" });
-  }
-  const signingKey = process.env.JWT_SIGNING_KEY;
+  const signingKey = await getSecret("/freshdesk/internal/jwtSigningKey");
   if (!signingKey) {
     log("error", "issuer_misconfigured", { sourceIp, reason: "no_signing_key" });
     return reply(500, { error: "server misconfigured" });
   }
 
-  // --- Parse + validate body ---
   let body;
   try {
     body = JSON.parse(event.body || "{}");
@@ -137,27 +102,27 @@ export const handler = async (event) => {
     return reply(400, { error: validationError });
   }
 
-  // --- Verify per-tenant secret ---
-  const tenant = tenantConfigs[body.freshdeskDomain];
-  if (!tenant || !tenant.token) {
-    log("warn", "issuer_unknown_tenant", { sourceIp, freshdeskDomain: body.freshdeskDomain });
-    return reply(403, { error: "unknown tenant" });
-  }
+  const tenantApiKey = await getSecret(
+    `/freshdesk/tenants/${body.freshdeskDomain}/issuerApiKey`
+  );
+  const provided = extractBearer(event.headers || {});
 
-  const headers = event.headers || {};
-  const apiKey = headers["x-api-key"] || headers["X-API-Key"] || "";
-  if (!secretMatches(apiKey, tenant.token)) {
-    log("warn", "issuer_bad_api_key", { sourceIp, freshdeskDomain: body.freshdeskDomain });
+  // Uniform 401 for both unknown-tenant and bad-key (closes Finding 5).
+  if (!tenantApiKey || !secretMatches(provided, tenantApiKey)) {
+    log("warn", "issuer_auth_denied", {
+      sourceIp,
+      reason: tenantApiKey ? (provided ? "bad_api_key" : "missing_bearer") : "unknown_tenant",
+      freshdeskDomain: body.freshdeskDomain,
+    });
     return reply(401, { error: "unauthorized" });
   }
 
-  // --- Issue the JWT ---
   const now = Math.floor(Date.now() / 1000);
   const payload = {
-    sub: body.userEmail,                // already validated, no "unknown" fallback
+    sub: body.userEmail,
     domain: body.freshdeskDomain,
     iat: now,
-    nbf: now - 30,                      // clock-skew tolerance
+    nbf: now - 30,
     exp: now + TOKEN_TTL_SECONDS,
   };
   const token = signJwt(payload, signingKey);
@@ -168,6 +133,5 @@ export const handler = async (event) => {
     sub: body.userEmail,
     ttl: TOKEN_TTL_SECONDS,
   });
-
   return reply(200, { token, expiresIn: TOKEN_TTL_SECONDS });
 };

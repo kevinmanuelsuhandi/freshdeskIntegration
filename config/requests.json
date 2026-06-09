@@ -13,11 +13,11 @@
   "getWsToken": {
     "schema": {
       "method": "POST",
-      "host": "<%= iparam.ws_issuer_host %>",
-      "path": "<%= iparam.ws_issuer_path %>",
+      "host": "shhltr27pqdez43x6ymor4oovy0tjgwv.lambda-url.ap-southeast-1.on.aws",
+      "path": "/",
       "headers": {
         "Content-Type": "application/json",
-        "X-API-Key": "<%= iparam.tenant_token %>"
+        "Authorization": "Bearer <%= iparam.api_shared_secret %>"
       }
     }
   }
