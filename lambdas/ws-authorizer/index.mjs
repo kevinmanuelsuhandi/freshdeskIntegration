@@ -50,8 +50,12 @@ function verifyJwt(token, key) {
     return { ok: false, reason: "bad_payload" };
   }
   const now = Math.floor(Date.now() / 1000);
-  if (payload.exp && now > payload.exp) return { ok: false, reason: "expired" };
-  if (payload.nbf && now < payload.nbf) return { ok: false, reason: "not_yet_valid" };
+  if (typeof payload.exp !== "number" || now > payload.exp) {
+    return { ok: false, reason: "expired" };
+  }
+  if (typeof payload.nbf === "number" && now < payload.nbf) {
+    return { ok: false, reason: "not_yet_valid" };
+  }
   return { ok: true, payload };
 }
 

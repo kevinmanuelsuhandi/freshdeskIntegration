@@ -72,8 +72,12 @@ const HOST_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[
 
 function validateInput(body) {
   if (!body || typeof body !== "object") return "invalid body";
-  if (typeof body.freshdeskDomain !== "string" || !HOST_RE.test(body.freshdeskDomain)) {
-    return "freshdeskDomain required (valid hostname)";
+  if (
+    typeof body.freshdeskDomain !== "string" ||
+    body.freshdeskDomain.length > 255 ||
+    !HOST_RE.test(body.freshdeskDomain)
+  ) {
+    return "freshdeskDomain required (valid hostname, max 255 chars)";
   }
   if (typeof body.userEmail !== "string" || !EMAIL_RE.test(body.userEmail) || body.userEmail.length > 254) {
     return "userEmail required (valid email)";
